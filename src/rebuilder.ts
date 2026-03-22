@@ -229,9 +229,10 @@ export class InstructionRebuilder {
       : PUMP_FUN_SELL_DISCRIMINATOR;
     disc.copy(data, 0);
 
-    // Token amount (u64) - for buy, this is typically set to max (slippage handled via maxSolCost)
-    // Use a large number to represent "buy as much as possible"
-    const tokenAmount = isBuy ? BigInt("18446744073709551615") : BigInt(0);
+    // Token amount (u64) - for buy, set to u64::MAX (buy as much as possible;
+    // actual slippage is controlled via maxSolCost). For sell, set to 0.
+    const U64_MAX = BigInt("18446744073709551615");
+    const tokenAmount = isBuy ? U64_MAX : BigInt(0);
     data.writeBigUInt64LE(tokenAmount, 8);
 
     // Max SOL cost with slippage (u64, in lamports)
