@@ -71,10 +71,21 @@ export async function buildSwapInstructions(
     amountIn,
     minAmountOut,
     direction,
-    creatorAddress,
     computeUnitLimit = 200_000,
     computeUnitPrice,
   } = params;
+
+  // Resolve the creator address - either provided or fetched from chain
+  let creatorAddress = params.creatorAddress;
+  if (!creatorAddress) {
+    const bondingCurve = derivePumpfunBondingCurve(mint);
+    creatorAddress = await fetchBondingCurveCreator(connection, bondingCurve) ?? undefined;
+    if (!creatorAddress) {
+      throw new Error(
+        "Could not determine creator address. Provide creatorAddress parameter or ensure the bonding curve account is accessible."
+      );
+    }
+  }
 
   const tokenProgramId = resolveTokenProgram(
     params.tokenProgramType || TokenProgramType.TOKEN
@@ -144,7 +155,7 @@ function buildPumpfunSwapInstruction(params: {
   minAmountOut: bigint;
   direction: SwapDirection;
   tokenProgramId: PublicKey;
-  creatorAddress?: PublicKey;
+  creatorAddress: PublicKey;
 }): TransactionInstruction {
   const {
     signer,
@@ -169,11 +180,7 @@ function buildPumpfunSwapInstruction(params: {
   const globalVolumeAccumulator = derivePumpfunGlobalVolumeAccumulator();
   const userVolumeAccumulator = derivePumpfunUserVolumeAccumulator(signer);
   const feeConfig = derivePumpfunFeeConfig();
-
-  // Creator vault - if we know the creator, derive it; otherwise use a placeholder
-  const creatorVault = creatorAddress
-    ? derivePumpfunCreatorVault(creatorAddress)
-    : derivePumpfunCreatorVault(signer); // Will be overridden if we know the creator
+  const creatorVault = derivePumpfunCreatorVault(creatorAddress);
 
   // Determine the instruction discriminator
   const discriminator =

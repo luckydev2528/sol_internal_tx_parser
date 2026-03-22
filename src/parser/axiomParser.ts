@@ -260,8 +260,16 @@ function extractTokenBalances(
   const accountKeys = tx.transaction.message.accountKeys;
   for (let i = 0; i < accountKeys.length; i++) {
     const key = accountKeys[i]!;
-    const keyObj = key as { pubkey?: PublicKey };
-    const pubkey = keyObj.pubkey ? keyObj.pubkey.toBase58() : (key as unknown as PublicKey).toBase58();
+    // ParsedTransaction accountKeys can be either ParsedMessageAccount
+    // (with pubkey, signer, writable fields) or plain PublicKey.
+    let pubkey: string;
+    if (typeof key === "object" && "pubkey" in key && key.pubkey instanceof PublicKey) {
+      pubkey = key.pubkey.toBase58();
+    } else if (key instanceof PublicKey) {
+      pubkey = key.toBase58();
+    } else {
+      continue;
+    }
     if (pubkey === ownerStr) {
       const preBal = tx.meta?.preBalances?.[i] || 0;
       const postBal = tx.meta?.postBalances?.[i] || 0;
