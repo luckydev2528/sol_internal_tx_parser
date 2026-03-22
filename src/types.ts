@@ -1,118 +1,124 @@
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
-/** Direction of the swap */
+// ─── Swap Direction ────────────────────────────────────────────────────────
+
 export enum SwapDirection {
   SOL_TO_TOKEN = "SOL_TO_TOKEN",
   TOKEN_TO_SOL = "TOKEN_TO_SOL",
 }
 
-/** Detected DEX platform */
-export type DexPlatform =
-  | "pump_fun"
-  | "pumpswap"
-  | "jupiter"
-  | "raydium"
-  | "raydium_clmm"
-  | "orca"
-  | "meteora"
-  | "meteora_dlmm"
-  | "unknown";
+// ─── DEX Types ─────────────────────────────────────────────────────────────
 
-/** Token program variant */
-export type TokenProgramType = "token" | "token2022";
-
-/** Parsed swap information extracted from a transaction */
-export interface ParsedSwap {
-  /** Transaction signature */
-  signature: string;
-  /** Fee payer / signer wallet */
-  signer: string;
-  /** Router program that initiated the swap (e.g., Axiom Trade) */
-  routerProgram: string;
-  /** Underlying DEX platform where the swap was executed */
-  platform: DexPlatform;
-  /** Swap direction */
-  direction: SwapDirection;
-  /** Token mint address */
-  tokenMint: string;
-  /** SOL amount (in SOL, not lamports) */
-  solAmount: number;
-  /** Token amount (UI amount, adjusted for decimals) */
-  tokenAmount: number;
-  /** Token decimals */
-  tokenDecimals: number;
-  /** Token program type */
-  tokenProgramType: TokenProgramType;
+export enum DexType {
+  PUMPFUN = "PUMPFUN",
+  UNKNOWN = "UNKNOWN",
 }
 
-/** Account mapping for a Pump.fun buy instruction */
-export interface PumpFunBuyAccounts {
-  global: PublicKey;
-  feeRecipient: PublicKey;
+// ─── Token Program Type ────────────────────────────────────────────────────
+
+export enum TokenProgramType {
+  TOKEN = "TOKEN",
+  TOKEN_2022 = "TOKEN_2022",
+}
+
+// ─── Axiom Instruction Type ────────────────────────────────────────────────
+
+export enum AxiomInstructionType {
+  BUY_EXACT_IN = "buy_exact_in",
+  SELL_EXACT_IN = "sell_exact_in",
+  SELL = "sell",
+  BUY = "buy",
+  BUY_MAX_OUT = "buy_max_out",
+  UNKNOWN = "unknown",
+}
+
+// ─── Parsed Axiom Instruction ──────────────────────────────────────────────
+
+export interface ParsedAxiomInstruction {
+  type: AxiomInstructionType;
+  direction: SwapDirection;
+  dex: DexType;
+  mint: PublicKey;
+  amountIn: bigint;
+  minAmountOut: bigint;
+  accounts: AxiomAccountsMap;
+  rawData: Buffer;
+}
+
+// ─── Axiom Accounts Map ────────────────────────────────────────────────────
+
+export interface AxiomAccountsMap {
+  signer: PublicKey;
   mint: PublicKey;
   bondingCurve: PublicKey;
   associatedBondingCurve: PublicKey;
   associatedUser: PublicKey;
-  user: PublicKey;
+  global: PublicKey;
+  feeRecipient: PublicKey;
+  eventAuthority: PublicKey;
+  creatorVault: PublicKey;
   systemProgram: PublicKey;
   tokenProgram: PublicKey;
-  creatorVault: PublicKey;
-  rent: PublicKey;
-  eventAuthority: PublicKey;
-  program: PublicKey;
+  dexProgram: PublicKey;
+  globalVolumeAccumulator?: PublicKey;
+  userVolumeAccumulator?: PublicKey;
+  feeConfig?: PublicKey;
+  feeProgram?: PublicKey;
 }
 
-/** Decoded Pump.fun instruction data */
-export interface PumpFunInstructionData {
-  discriminator: Buffer;
-  tokenAmount: bigint;
-  maxSolCost: bigint;
+// ─── Routing Layout ────────────────────────────────────────────────────────
+
+export interface RoutingLayout {
+  dex: DexType;
+  direction: SwapDirection;
+  tokenMint: PublicKey;
+  tokenProgramType: TokenProgramType;
+  poolOrientation: PoolOrientation;
+  accounts: AxiomAccountsMap;
 }
 
-/** Decoded Pump.fun TradeEvent (from CPI event logs) */
-export interface PumpFunTradeEvent {
-  mint: PublicKey;
-  solAmount: bigint;
-  tokenAmount: bigint;
-  isBuy: boolean;
-  user: PublicKey;
-  timestamp: bigint;
-  virtualSolReserves: bigint;
-  virtualTokenReserves: bigint;
+// ─── Pool Orientation ──────────────────────────────────────────────────────
+
+export enum PoolOrientation {
+  /** SOL is the base token in the pool (SOL/Token) */
+  SOL_BASE = "SOL_BASE",
+  /** SOL is the quote token in the pool (Token/SOL) */
+  SOL_QUOTE = "SOL_QUOTE",
 }
 
-/** Complete routing info extracted from the transaction */
-export interface RoutingInfo {
-  /** The parsed swap details */
-  swap: ParsedSwap;
-  /** Pump.fun-specific account mapping (if applicable) */
-  pumpFunAccounts?: PumpFunBuyAccounts;
-  /** Pump.fun trade event data (if found in logs) */
-  tradeEvent?: PumpFunTradeEvent;
-  /** Raw inner instruction indices used by the router */
-  innerInstructionIndices: number[];
+// ─── Rebuild Result ────────────────────────────────────────────────────────
+
+export interface RebuildResult {
+  instructions: TransactionInstruction[];
+  signers: PublicKey[];
+  /** Estimated compute units needed */
+  computeUnits: number;
+  routing: RoutingLayout;
 }
 
-/** Result of instruction rebuild */
-export interface RebuiltInstruction {
-  /** Serialized transaction (base64) ready for simulation */
-  serializedTransaction: string;
-  /** The accounts involved */
-  accounts: {
-    pubkey: string;
-    isSigner: boolean;
-    isWritable: boolean;
-  }[];
-  /** Instruction data (hex) */
-  data: string;
-  /** Program ID */
-  programId: string;
-}
+// ─── Simulation Result ─────────────────────────────────────────────────────
 
-/** Simulation result */
 export interface SimulationResult {
   success: boolean;
   logs: string[];
   unitsConsumed: number;
   error?: string;
+  returnData?: {
+    programId: string;
+    data: string;
+  };
+}
+
+// ─── Parsed Swap Result (high-level) ───────────────────────────────────────
+
+export interface ParsedSwapResult {
+  signature: string;
+  signer: string;
+  direction: SwapDirection;
+  dex: DexType;
+  tokenMint: string;
+  tokenProgramType: TokenProgramType;
+  solAmount: number;
+  tokenAmount: number;
+  instructionType: AxiomInstructionType;
 }

@@ -1,19 +1,49 @@
 # sol_internal_tx_parser
 
-Parse Axiom Trade transactions on Solana to extract token mint address, bought amount, routing layout, and rebuild swap instructions for simulation.
+Parse Axiom Trade transactions on Solana, extract token mint, swap direction, and routing details, then rebuild and simulate swap instructions.
+
+## Overview
+
+This library parses transactions from the **Axiom Trade** program (`FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9`) on Solana. It currently supports swaps routed through **Pump.fun** (`6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`).
+
+### Reference Transaction
+
+The parser was built to handle transactions like:
+- **Signature**: `4TphkyQv7wnYRkiD2WcujxafffAoNuT9HJn83AdGrBrM1TdQ8X2FFZVZ1oEaWV7n97wFnygoqupr48kf2zAjvGtM`
+- **Action**: Swap 2.9612 SOL → 25,342,622.492742 EID on Pump.fun via Axiom Trade
+- **Signer**: `H4K5LjkjXVRBsQXJig3xq9L6co6SfoqRiqnih5iohX9A`
 
 ## Features
 
-- **Transaction Parsing**: Fetch and parse Axiom Trade transactions from Solana RPC
-- **Routing Layout Detection**: Identify the underlying DEX (Pump.fun, Raydium, Jupiter, etc.)
-- **Swap Extraction**: Extract correct mint, direction (SOL → token), amounts, and accounts
-- **Instruction Rebuild**: Reconstruct swap instructions with proper:
-  - ATA (Associated Token Account) creation
-  - WSOL (Wrapped SOL) handling
-  - Token program detection (SPL Token vs Token2022)
-  - Pool orientation and vault swap accounts
-  - Fee accounts
-- **Simulation**: Validate rebuilt transactions pass simulation
+### 1. Routing Layout Understanding
+- Identifies the DEX used (Pump.fun)
+- Determines pool orientation (SOL as quote/base)
+- Maps all accounts in the instruction
+
+### 2. Extraction
+- **Correct mint** — token mint address from the instruction accounts
+- **Correct direction** — SOL → Token (buy) or Token → SOL (sell)
+- **Correct accounts mapping** — all 16 accounts mapped to their roles
+
+### 3. Instruction Rebuild
+- Derives all PDAs (bonding curve, event authority, creator vault, etc.)
+- Generates proper Anchor-formatted instruction data with discriminators
+- Supports both `buy_exact_in` and `sell_exact_in` instructions
+
+### 4. ATA, WSOL, Token Program Handling
+- **ATA**: Creates associated token accounts idempotently
+- **WSOL**: Provides wrap/unwrap utilities for DEXes that require Wrapped SOL
+- **Token Program**: Detects and handles both SPL Token and Token-2022
+
+### 5. Pool, Vault, and Fee Account Handling
+- **Pool orientation**: Pump.fun uses Token/SOL bonding curve (SOL as quote)
+- **Vault swaps**: Derives creator vault PDA from bonding curve data
+- **Fee accounts**: Includes fee recipient, fee config PDA, and fee program
+
+### 6. Simulation
+- Builds versioned transactions (V0) for simulation
+- Simulates without signature verification
+- Returns detailed logs, compute units, and error info
 
 ## Installation
 
@@ -21,118 +51,122 @@ Parse Axiom Trade transactions on Solana to extract token mint address, bought a
 npm install
 ```
 
-## Configuration
-
-Copy `.env.example` to `.env` and set your Solana RPC endpoint:
+## Build
 
 ```bash
-cp .env.example .env
+npm run build
 ```
 
-A free RPC endpoint from [Helius](https://www.helius.dev/) or [QuickNode](https://www.quicknode.com/) is recommended for best results.
-
-## Usage
-
-### Command Line
-
-Parse a specific transaction:
+## Test
 
 ```bash
-npm run parse -- <TRANSACTION_SIGNATURE>
+npm test
 ```
 
-Example with the reference transaction:
+## CLI Usage
 
 ```bash
-npm run parse -- 4TphkyQv7wnYRkiD2WcujxafffAoNuT9HJn83AdGrBrM1TdQ8X2FFZVZ1oEaWV7n97wFnygoqupr48kf2zAjvGtM
+npx ts-node src/cli.ts <transaction-signature> [rpc-url]
 ```
 
-### Programmatic API
+Example:
+```bash
+npx ts-node src/cli.ts 4TphkyQv7wnYRkiD2WcujxafffAoNuT9HJn83AdGrBrM1TdQ8X2FFZVZ1oEaWV7n97wFnygoqupr48kf2zAjvGtM https://api.mainnet-beta.solana.com
+```
+
+## Programmatic Usage
 
 ```typescript
-import { AxiomTransactionParser, InstructionRebuilder, TransactionSimulator } from "sol_internal_tx_parser";
+import {
+  createConnection,
+  parseAxiomTransaction,
+  buildSwapInstructions,
+  simulateTransaction,
+  SwapDirection,
+} from "sol_internal_tx_parser";
 import { PublicKey } from "@solana/web3.js";
 
-const rpcEndpoint = "https://api.mainnet-beta.solana.com";
+// Parse an existing transaction
+const connection = createConnection("https://api.mainnet-beta.solana.com");
+const result = await parseAxiomTransaction(connection, "<signature>");
 
-// Step 1: Parse a transaction
-const parser = new AxiomTransactionParser(rpcEndpoint);
-const routingInfo = await parser.parseTransaction("4TphkyQv...");
+console.log(result.tokenMint);      // Token mint address
+console.log(result.direction);      // SOL_TO_TOKEN or TOKEN_TO_SOL
+console.log(result.solAmount);      // SOL amount
+console.log(result.tokenAmount);    // Token amount
 
-console.log(routingInfo.swap.tokenMint);     // Token mint address
-console.log(routingInfo.swap.direction);      // "SOL_TO_TOKEN" or "TOKEN_TO_SOL"
-console.log(routingInfo.swap.solAmount);      // SOL amount
-console.log(routingInfo.swap.tokenAmount);    // Token amount
-console.log(routingInfo.swap.platform);       // "pump_fun", "raydium", etc.
+// Build a new swap instruction
+const rebuild = await buildSwapInstructions(connection, {
+  signer: new PublicKey("<your-wallet>"),
+  mint: new PublicKey("<token-mint>"),
+  amountIn: BigInt(2_000_000_000),   // 2 SOL in lamports
+  minAmountOut: BigInt(0),            // Set appropriate slippage
+  direction: SwapDirection.SOL_TO_TOKEN,
+});
 
-// Step 2: Rebuild the instruction
-const rebuilder = new InstructionRebuilder(rpcEndpoint);
-const rebuilt = await rebuilder.rebuildPumpFunBuy(
-  routingInfo,
-  new PublicKey("YOUR_WALLET"),
-  2.9612,  // SOL amount
-  1000     // 10% slippage in BPS
+// Simulate
+const sim = await simulateTransaction(
+  connection,
+  rebuild.instructions,
+  new PublicKey("<your-wallet>"),
 );
-
-// Step 3: Simulate
-const simulator = new TransactionSimulator(rpcEndpoint);
-const result = await simulator.simulate(rebuilt.serializedTransaction);
-console.log(result.success); // true if simulation passes
+console.log("Success:", sim.success);
+console.log("Compute:", sim.unitsConsumed);
 ```
 
 ## Architecture
 
 ```
 src/
-  constants.ts   - Program IDs, discriminators, known accounts
-  types.ts       - TypeScript type definitions
-  parser.ts      - Transaction parser (fetch + decode Axiom Trade routing)
-  rebuilder.ts   - Instruction rebuilder (reconstruct swap instructions)
-  simulator.ts   - Transaction simulator
-  utils.ts       - Utilities (ATA, WSOL, token program detection)
-  index.ts       - Main entry point and API exports
-  test.ts        - Unit tests
+├── index.ts                         # Main exports
+├── constants.ts                     # Program IDs, discriminators, seeds
+├── types.ts                         # TypeScript interfaces and enums
+├── cli.ts                           # CLI entry point
+├── parser/
+│   ├── axiomParser.ts               # Parse Axiom Trade instructions
+│   └── routingLayout.ts             # Analyze routing layout
+├── builder/
+│   └── instructionBuilder.ts        # Build swap instructions
+├── simulator/
+│   └── simulator.ts                 # Transaction simulation
+├── utils/
+│   ├── connection.ts                # RPC connection helper
+│   ├── decoder.ts                   # Binary data encoding/decoding
+│   └── pda.ts                       # PDA derivation helpers
+└── test/
+    └── parser.test.ts               # Unit tests
 ```
 
-## How It Works
+## Supported Instruction Types
 
-### Parsing Flow
+| Instruction | Direction | Discriminator |
+|---|---|---|
+| `buy_exact_in` | SOL → Token | `faea0d7bd59c13ec` |
+| `sell_exact_in` | Token → SOL | `9527de9bd37c981a` |
+| `buy` | SOL → Token | `66063d1201daebea` |
+| `sell` | Token → SOL | `33e685a4017f83ad` |
+| `buy_max_out` | SOL → Token | `60b1cb75b741c4b1` |
 
-1. **Fetch transaction** from Solana RPC using `getParsedTransaction`
-2. **Identify Axiom Trade** instruction (program ID: `FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9`)
-3. **Detect underlying DEX** from inner instructions (CPI calls)
-4. **Extract swap details** using two methods:
-   - **CPI Method**: Decode Pump.fun inner instructions (discriminator matching + TradeEvent parsing)
-   - **Balance Method**: Compare pre/post token balances (universal fallback)
-5. **Map accounts**: Extract bonding curve, fee recipient, creator vault, etc.
+## Pump.fun Account Layout
 
-### Supported DEXs
+The Axiom Trade CPI into Pump.fun uses this account ordering:
 
-| DEX | Program ID | Status |
-|-----|-----------|--------|
-| Pump.fun | `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P` | ✅ Full support |
-| PumpSwap | `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA` | ✅ Detection |
-| Jupiter | `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4` | ✅ Detection |
-| Raydium | `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8` | ✅ Detection |
-| Orca | `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc` | ✅ Detection |
-| Meteora | `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` | ✅ Detection |
+| Index | Account | Writable | Signer |
+|---|---|---|---|
+| 0 | Global | No | No |
+| 1 | Fee Recipient | Yes | No |
+| 2 | Mint | Yes | No |
+| 3 | Bonding Curve | Yes | No |
+| 4 | Associated Bonding Curve | Yes | No |
+| 5 | Associated User (ATA) | Yes | No |
+| 6 | Signer / User | Yes | Yes |
+| 7 | System Program | No | No |
+| 8 | Token Program | No | No |
+| 9 | Creator Vault | Yes | No |
+| 10 | Event Authority | No | No |
+| 11 | DEX Program (Pump.fun) | No | No |
+| 12 | Global Volume Accumulator | Yes | No |
+| 13 | User Volume Accumulator | Yes | No |
+| 14 | Fee Config | No | No |
+| 15 | Fee Program | No | No |
 
-## Testing
-
-```bash
-npm test
-```
-
-## Building
-
-```bash
-npm run build
-```
-
-## Reference Transaction
-
-The reference transaction used for development:
-- **Signature**: `4TphkyQv7wnYRkiD2WcujxafffAoNuT9HJn83AdGrBrM1TdQ8X2FFZVZ1oEaWV7n97wFnygoqupr48kf2zAjvGtM`
-- **Signer**: `H4K5LjkjXVRBsQXJig3xq9L6co6SfoqRiqnih5iohX9A`
-- **Swap**: 2.9612 SOL → 25,342,622.492742 EID on Pump.fun
-- **Router**: Axiom Trade (`FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9`)
