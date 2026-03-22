@@ -1,0 +1,31 @@
+{
+  "name": "sol_internal_tx_parser",
+  "version": "1.0.0",
+  "description": "Parse Axiom Trade transactions on Solana to extract token mint address, bought amount, routing, and rebuild swap instructions",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/index.ts",
+    "parse": "ts-node src/index.ts",
+    "test": "ts-node src/test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luckydev2528/sol_internal_tx_parser.git"
+  },
+  "keywords": ["solana", "axiom", "parser", "defi", "swap"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.13",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.2"
+  }
+}
