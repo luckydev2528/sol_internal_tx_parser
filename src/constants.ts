@@ -14,6 +14,10 @@ export const PUMPFUN_FEE_PROGRAM_ID = new PublicKey(
   "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
 );
 
+export const PUMPSWAP_PROGRAM_ID = new PublicKey(
+  "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+);
+
 export const TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 );

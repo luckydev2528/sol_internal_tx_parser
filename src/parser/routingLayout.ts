@@ -27,9 +27,8 @@ export function analyzeRoutingLayout(
       ? TokenProgramType.TOKEN_2022
       : TokenProgramType.TOKEN;
 
-  // Pump.fun always uses Token/SOL orientation (SOL is the quote)
   const poolOrientation =
-    dex === DexType.PUMPFUN
+    dex === DexType.PUMPFUN || dex === DexType.PUMPSWAP
       ? PoolOrientation.SOL_QUOTE
       : PoolOrientation.SOL_BASE;
 

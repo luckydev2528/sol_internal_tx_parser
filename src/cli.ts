@@ -13,6 +13,7 @@ import {
   parseAxiomTransaction,
   parseAxiomFromParsedTransaction,
   extractRawInstructions,
+  fetchTransactionALTs,
 } from "./parser/axiomParser";
 import { analyzeRoutingLayout, describeRoutingLayout } from "./parser/routingLayout";
 import { buildSwapInstructions } from "./builder/instructionBuilder";
@@ -78,12 +79,17 @@ async function main(): Promise<void> {
         "\nStep 3: Simulating original transaction instructions..."
       );
       const rawIxs = extractRawInstructions(tx);
-      console.log(`  Extracted ${rawIxs.length} instructions from parsed tx`);
+      const alts = await fetchTransactionALTs(connection, tx);
+      console.log(
+        `  Extracted ${rawIxs.length} instructions` +
+          (alts.length ? `, ${alts.length} address lookup table(s)` : "")
+      );
 
       const simSummary = await simulateAndSummarize(
         connection,
         rawIxs,
-        parsedIx.accounts.signer
+        parsedIx.accounts.signer,
+        alts.length > 0 ? alts : undefined
       );
       console.log(simSummary);
     } else {

@@ -11,6 +11,7 @@ export enum SwapDirection {
 
 export enum DexType {
   PUMPFUN = "PUMPFUN",
+  PUMPSWAP = "PUMPSWAP",
   UNKNOWN = "UNKNOWN",
 }
 

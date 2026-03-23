@@ -1,5 +1,6 @@
 import {
   AccountMeta,
+  AddressLookupTableAccount,
   Connection,
   ParsedTransactionWithMeta,
   PartiallyDecodedInstruction,
@@ -11,6 +12,7 @@ import {
   AXIOM_TRADE_PROGRAM_ID,
   NATIVE_MINT,
   PUMPFUN_PROGRAM_ID,
+  PUMPSWAP_PROGRAM_ID,
 } from "../constants";
 import {
   AxiomAccountsMap,
@@ -66,22 +68,37 @@ export async function parseAxiomTransaction(
 
 /**
  * Parse the Axiom Trade instruction from a pre-fetched parsed transaction.
+ *
+ * A transaction may contain multiple Axiom instructions (e.g. a short
+ * setup/tip instruction followed by the actual swap).  We try each one
+ * and return the first that decodes successfully.
  */
 export function parseAxiomFromParsedTransaction(
   tx: ParsedTransactionWithMeta
 ): ParsedAxiomInstruction {
-  const instructions = tx.transaction.message.instructions;
+  const axiomIxs = tx.transaction.message.instructions.filter(
+    (ix) =>
+      ix.programId.toBase58() === AXIOM_TRADE_PROGRAM_ID.toBase58() &&
+      "data" in ix &&
+      "accounts" in ix
+  ) as PartiallyDecodedInstruction[];
 
-  // Find the Axiom Trade instruction
-  const axiomIx = instructions.find(
-    (ix) => ix.programId.toBase58() === AXIOM_TRADE_PROGRAM_ID.toBase58()
-  ) as PartiallyDecodedInstruction | undefined;
-
-  if (!axiomIx) {
+  if (axiomIxs.length === 0) {
     throw new Error("No Axiom Trade instruction found in transaction");
   }
 
-  return decodeAxiomInstruction(axiomIx, tx);
+  const errors: string[] = [];
+  for (const ix of axiomIxs) {
+    try {
+      return decodeAxiomInstruction(ix, tx);
+    } catch (e: any) {
+      errors.push(e.message || String(e));
+    }
+  }
+
+  throw new Error(
+    `None of the ${axiomIxs.length} Axiom instruction(s) could be decoded:\n  - ${errors.join("\n  - ")}`
+  );
 }
 
 /**
@@ -349,6 +366,33 @@ export function extractRawInstructions(
 }
 
 /**
+ * Fetch the Address Lookup Table accounts referenced by a parsed v0
+ * transaction so they can be passed to the simulator.
+ */
+export async function fetchTransactionALTs(
+  connection: Connection,
+  tx: ParsedTransactionWithMeta
+): Promise<AddressLookupTableAccount[]> {
+  const lookups = (tx.transaction.message as any).addressTableLookups;
+  if (!lookups || !Array.isArray(lookups) || lookups.length === 0) {
+    return [];
+  }
+
+  const tables: AddressLookupTableAccount[] = [];
+  for (const entry of lookups) {
+    const key =
+      entry.accountKey instanceof PublicKey
+        ? entry.accountKey
+        : new PublicKey(entry.accountKey);
+    const result = await connection.getAddressLookupTable(key);
+    if (result.value) {
+      tables.push(result.value);
+    }
+  }
+  return tables;
+}
+
+/**
  * Determine swap direction from instruction type.
  */
 function getDirectionFromInstructionType(
@@ -377,19 +421,27 @@ function identifyDexFromInnerInstructions(
 ): DexType {
   const innerInstructions = tx.meta?.innerInstructions || [];
 
+  let foundPumpSwap = false;
   for (const innerSet of innerInstructions) {
     for (const inner of innerSet.instructions) {
-      if (inner.programId.toBase58() === PUMPFUN_PROGRAM_ID.toBase58()) {
+      const pid = inner.programId.toBase58();
+      if (pid === PUMPFUN_PROGRAM_ID.toBase58()) {
         return DexType.PUMPFUN;
+      }
+      if (pid === PUMPSWAP_PROGRAM_ID.toBase58()) {
+        foundPumpSwap = true;
       }
     }
   }
+  if (foundPumpSwap) return DexType.PUMPSWAP;
 
-  // Also check the log messages for hints
   const logs = tx.meta?.logMessages || [];
   for (const log of logs) {
     if (log.includes(PUMPFUN_PROGRAM_ID.toBase58())) {
       return DexType.PUMPFUN;
+    }
+    if (log.includes(PUMPSWAP_PROGRAM_ID.toBase58())) {
+      return DexType.PUMPSWAP;
     }
   }
 
