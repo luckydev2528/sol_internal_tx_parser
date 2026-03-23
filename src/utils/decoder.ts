@@ -80,7 +80,35 @@ export function decodeSwapArgs(data: Buffer): {
 }
 
 /**
- * Encode swap instruction data with discriminator and args.
+ * Decode the compact (non-Anchor) Axiom instruction format.
+ * Layout: [u8 variant][u64 amount_in][u64 min_amount_out][optional extra]
+ *
+ * Variant 0 = buy (SOL → token via bonding curve)
+ * Variant 1 = sell (token → SOL via bonding curve)
+ */
+export function decodeCompactInstruction(data: Buffer): {
+  type: AxiomInstructionType;
+  amountIn: bigint;
+  minAmountOut: bigint;
+} | null {
+  if (data.length < 17) return null;
+
+  const variant = data[0]!;
+  const amountIn = readU64LE(data, 1);
+  const minAmountOut = readU64LE(data, 9);
+
+  switch (variant) {
+    case 0:
+      return { type: AxiomInstructionType.COMPACT_BUY, amountIn, minAmountOut };
+    case 1:
+      return { type: AxiomInstructionType.COMPACT_SELL, amountIn, minAmountOut };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Encode swap instruction data with Anchor discriminator and args.
  */
 export function encodeSwapData(
   discriminator: Buffer,
@@ -92,4 +120,20 @@ export function encodeSwapData(
     writeU64LE(amountIn),
     writeU64LE(minAmountOut),
   ]);
+}
+
+/**
+ * Encode compact (non-Anchor) swap instruction data.
+ * Layout: [u8 variant][u64 amount_in LE][u64 min_amount_out LE]
+ */
+export function encodeCompactSwapData(
+  variant: number,
+  amountIn: bigint,
+  minAmountOut: bigint
+): Buffer {
+  const buf = Buffer.alloc(17);
+  buf.writeUInt8(variant, 0);
+  buf.writeBigUInt64LE(amountIn, 1);
+  buf.writeBigUInt64LE(minAmountOut, 9);
+  return buf;
 }

@@ -9,12 +9,15 @@
  */
 
 import { createConnection } from "./utils/connection";
-import { parseAxiomTransaction } from "./parser/axiomParser";
-import { parseAxiomFromParsedTransaction } from "./parser/axiomParser";
+import {
+  parseAxiomTransaction,
+  parseAxiomFromParsedTransaction,
+  extractRawInstructions,
+} from "./parser/axiomParser";
 import { analyzeRoutingLayout, describeRoutingLayout } from "./parser/routingLayout";
 import { buildSwapInstructions } from "./builder/instructionBuilder";
 import { simulateAndSummarize } from "./simulator/simulator";
-import { SwapDirection, TokenProgramType } from "./types";
+import { AxiomInstructionType, SwapDirection, TokenProgramType } from "./types";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -60,44 +63,67 @@ async function main(): Promise<void> {
 
   if (tx) {
     const parsedIx = parseAxiomFromParsedTransaction(tx);
-    const routing = analyzeRoutingLayout(
-      parsedIx.dex,
-      parsedIx.direction,
-      parsedIx.accounts
-    );
 
-    console.log("\n=== Routing Layout ===");
-    console.log(describeRoutingLayout(routing));
+    const isCompact =
+      parsedIx.type === AxiomInstructionType.COMPACT_BUY ||
+      parsedIx.type === AxiomInstructionType.COMPACT_SELL;
 
-    // Step 3: Rebuild the instruction
-    console.log("\n\nStep 3: Rebuilding swap instruction...");
-    const rebuildResult = await buildSwapInstructions(connection, {
-      signer: parsedIx.accounts.signer,
-      mint: parsedIx.mint,
-      amountIn: parsedIx.amountIn,
-      minAmountOut: parsedIx.minAmountOut,
-      direction: parsedIx.direction,
-      tokenProgramType:
-        routing.tokenProgramType === TokenProgramType.TOKEN_2022
-          ? TokenProgramType.TOKEN_2022
-          : TokenProgramType.TOKEN,
-    });
+    if (isCompact || parsedIx.type === AxiomInstructionType.UNKNOWN) {
+      console.log("\n=== Decoded Instruction Args ===");
+      console.log(`  amountIn:      ${parsedIx.amountIn}`);
+      console.log(`  minAmountOut:  ${parsedIx.minAmountOut}`);
 
-    console.log(
-      `  Built ${rebuildResult.instructions.length} instructions`
-    );
-    console.log(
-      `  Compute Units: ${rebuildResult.computeUnits}`
-    );
+      // Simulate using the original instructions extracted from the parsed tx
+      console.log(
+        "\nStep 3: Simulating original transaction instructions..."
+      );
+      const rawIxs = extractRawInstructions(tx);
+      console.log(`  Extracted ${rawIxs.length} instructions from parsed tx`);
 
-    // Step 4: Simulate the rebuilt transaction
-    console.log("\nStep 4: Simulating rebuilt transaction...");
-    const simSummary = await simulateAndSummarize(
-      connection,
-      rebuildResult.instructions,
-      parsedIx.accounts.signer
-    );
-    console.log(simSummary);
+      const simSummary = await simulateAndSummarize(
+        connection,
+        rawIxs,
+        parsedIx.accounts.signer
+      );
+      console.log(simSummary);
+    } else {
+      const routing = analyzeRoutingLayout(
+        parsedIx.dex,
+        parsedIx.direction,
+        parsedIx.accounts
+      );
+
+      console.log("\n=== Routing Layout ===");
+      console.log(describeRoutingLayout(routing));
+
+      // Step 3: Rebuild the instruction
+      console.log("\n\nStep 3: Rebuilding swap instruction...");
+      const rebuildResult = await buildSwapInstructions(connection, {
+        signer: parsedIx.accounts.signer,
+        mint: parsedIx.mint,
+        amountIn: parsedIx.amountIn,
+        minAmountOut: parsedIx.minAmountOut,
+        direction: parsedIx.direction,
+        tokenProgramType:
+          routing.tokenProgramType === TokenProgramType.TOKEN_2022
+            ? TokenProgramType.TOKEN_2022
+            : TokenProgramType.TOKEN,
+      });
+
+      console.log(
+        `  Built ${rebuildResult.instructions.length} instructions`
+      );
+      console.log(`  Compute Units: ${rebuildResult.computeUnits}`);
+
+      // Step 4: Simulate the rebuilt transaction
+      console.log("\nStep 4: Simulating rebuilt transaction...");
+      const simSummary = await simulateAndSummarize(
+        connection,
+        rebuildResult.instructions,
+        parsedIx.accounts.signer
+      );
+      console.log(simSummary);
+    }
   }
 
   console.log("\n✅ Done!");

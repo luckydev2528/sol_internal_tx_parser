@@ -29,6 +29,10 @@ export enum AxiomInstructionType {
   SELL = "sell",
   BUY = "buy",
   BUY_MAX_OUT = "buy_max_out",
+  /** Compact format variant 0: buy via bonding curve (non-Anchor, u8 prefix) */
+  COMPACT_BUY = "compact_buy",
+  /** Compact format variant 1: sell via bonding curve (non-Anchor, u8 prefix) */
+  COMPACT_SELL = "compact_sell",
   UNKNOWN = "unknown",
 }
 
