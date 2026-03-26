@@ -9,7 +9,8 @@
     "test": "npx ts-node src/test/parser.test.ts && npx ts-node src/test/mirror.test.ts",
     "test:parser": "npx ts-node src/test/parser.test.ts",
     "test:mirror": "npx ts-node src/test/mirror.test.ts",
-    "parse": "npx ts-node src/cli.ts"
+    "parse": "npx ts-node src/cli.ts",
+    "mirror": "npx ts-node src/mirror-cli.ts"
   },
   "repository": {
     "type": "git",
