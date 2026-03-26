@@ -169,7 +169,9 @@ function decodeAxiomOuterInstruction(
   instructionIndex: number
 ): DecodedAxiomOuter | null {
   const data = ix.data;
-  if (data.length < 17) return null; // Need at least discriminator + some args
+  // Minimum data length: 8 bytes discriminator/variant + 8 bytes amountIn + 1 byte overhead
+  const MIN_INSTRUCTION_DATA_LENGTH = 17;
+  if (data.length < MIN_INSTRUCTION_DATA_LENGTH) return null;
 
   // Resolve accounts to PublicKeys
   const resolvedAccounts: PublicKey[] = [];

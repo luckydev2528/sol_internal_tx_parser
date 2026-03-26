@@ -70,7 +70,8 @@ import type {
 export interface MirrorConfig {
   /**
    * Fixed SOL amount for mirror buys (in lamports).
-   * If set, overrides proportional scaling.
+   * Only applies to buy direction — sell direction always uses original amounts.
+   * If not set, uses the original sniper's amount.
    * Example: BigInt(100_000_000) for 0.1 SOL.
    */
   fixedBuyAmountLamports?: bigint;
