@@ -6,7 +6,9 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "npx ts-node src/test/parser.test.ts",
+    "test": "npx ts-node src/test/parser.test.ts && npx ts-node src/test/mirror.test.ts",
+    "test:parser": "npx ts-node src/test/parser.test.ts",
+    "test:mirror": "npx ts-node src/test/mirror.test.ts",
     "parse": "npx ts-node src/cli.ts"
   },
   "repository": {
