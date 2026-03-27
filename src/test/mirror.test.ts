@@ -19,6 +19,7 @@ import {
   PUMPFUN_PROGRAM_ID,
   PUMPFUN_FEE_PROGRAM_ID,
   PUMPFUN_FEE_RECIPIENT,
+  PUMPSWAP_PROGRAM_ID,
   SYSTEM_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -668,6 +669,79 @@ function testEdgeCaseShortData(): void {
   assert(result === null, "Returns null for short instruction data");
 }
 
+function testDexDetectionFallback(): void {
+  section("DEX detection fallback for compact instructions");
+
+  // Build a compact buy instruction where position [11] in the instruction
+  // accounts is NOT the Pump.fun program, but Pump.fun IS referenced at a
+  // different position (simulating compact layout differences).
+  const randomKey = Keypair.generate().publicKey;
+  const global = derivePumpfunGlobal();
+  const bondingCurve = derivePumpfunBondingCurve(SAMPLE_MINT);
+  const assocBC = derivePumpfunAssociatedBondingCurve(bondingCurve, SAMPLE_MINT, TOKEN_PROGRAM_ID);
+  const userATA = deriveATA(SAMPLE_SIGNER, SAMPLE_MINT, TOKEN_PROGRAM_ID);
+  const creatorVault = derivePumpfunCreatorVault(SAMPLE_CREATOR);
+  const eventAuth = derivePumpfunEventAuthority();
+  const globalVolAcc = derivePumpfunGlobalVolumeAccumulator();
+  const userVolAcc = derivePumpfunUserVolumeAccumulator(SAMPLE_SIGNER);
+  const feeConfig = derivePumpfunFeeConfig();
+
+  // Account keys: position [11] is random, Pump.fun at position [15]
+  const accountKeys: PublicKey[] = [
+    SAMPLE_SIGNER,                 // 0 - signer
+    global,                        // 1 - global
+    PUMPFUN_FEE_RECIPIENT,         // 2 - feeRecipient
+    SAMPLE_MINT,                   // 3 - mint
+    bondingCurve,                  // 4 - bondingCurve
+    assocBC,                       // 5 - assocBC
+    userATA,                       // 6 - userATA
+    SYSTEM_PROGRAM_ID,             // 7 - system
+    TOKEN_PROGRAM_ID,              // 8 - token
+    creatorVault,                  // 9 - creatorVault
+    eventAuth,                     // 10 - eventAuth
+    randomKey,                     // 11 - NOT the DEX (random key)
+    globalVolAcc,                  // 12 - globalVolAcc
+    userVolAcc,                    // 13 - userVolAcc
+    feeConfig,                     // 14 - feeConfig
+    PUMPFUN_PROGRAM_ID,            // 15 - Pump.fun at non-standard position
+    AXIOM_TRADE_PROGRAM_ID,        // 16 - Axiom program
+  ];
+
+  // Instruction accounts reference all 16 positions
+  const axiomAccounts = [1, 2, 3, 4, 5, 6, 0, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+  const data = encodeCompactSwapData(0, BigInt("1000000000"), BigInt("5000000000"));
+
+  const tx: RawOuterTransaction = {
+    accountKeys,
+    instructions: [{ programIdIndex: 16, accounts: axiomAccounts, data }],
+  };
+
+  const d = findAxiomSwapInstruction(tx)!;
+  assert(d !== null, "Compact instruction decoded despite non-standard [11]");
+  assertEqual(d.instructionType, AxiomInstructionType.COMPACT_BUY, "Compact buy detected");
+  assertEqual(d.dex, "pumpfun", "DEX detected via fallback account scan");
+
+  // Same test for PumpSwap at position [15]
+  const pumpSwapKeys = [...accountKeys];
+  pumpSwapKeys[15] = PUMPSWAP_PROGRAM_ID;
+  const txPumpSwap: RawOuterTransaction = {
+    accountKeys: pumpSwapKeys,
+    instructions: [{ programIdIndex: 16, accounts: axiomAccounts, data }],
+  };
+  const d2 = findAxiomSwapInstruction(txPumpSwap)!;
+  assertEqual(d2.dex, "pumpswap", "PumpSwap detected via fallback account scan");
+
+  // Test that truly unknown DEX stays unknown (no known DEX in any position)
+  const unknownKeys = [...accountKeys];
+  unknownKeys[15] = Keypair.generate().publicKey;
+  const txUnknown: RawOuterTransaction = {
+    accountKeys: unknownKeys,
+    instructions: [{ programIdIndex: 16, accounts: axiomAccounts, data }],
+  };
+  const d3 = findAxiomSwapInstruction(txUnknown)!;
+  assertEqual(d3.dex, "unknown", "Truly unknown DEX stays unknown");
+}
+
 async function testMirrorDefaultAmounts(): Promise<void> {
   section("mirrorAxiomSwap — default (no fixed amount, uses original)");
 
@@ -754,6 +828,7 @@ async function runTests(): Promise<void> {
   await testMirrorCompactFormat();
   testEdgeCaseTooFewAccounts();
   testEdgeCaseShortData();
+  testDexDetectionFallback();
   await testMirrorDefaultAmounts();
   await testMirrorInstructionDataEncoding();
 
