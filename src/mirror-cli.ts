@@ -23,6 +23,7 @@ import {
   isAxiomTransaction,
   mirrorAxiomSwap,
 } from "./mirror";
+import { parseAxiomTransaction } from "./parser/axiomParser";
 import { simulateAndSummarize } from "./simulator/simulator";
 import { AXIOM_TRADE_PROGRAM_ID } from "./constants";
 
@@ -156,9 +157,34 @@ async function main(): Promise<void> {
     `     (NO inner instructions, NO parsed metadata, NO token balances)`
   );
 
-  // ── Step 4: Check if it's an Axiom transaction ─────────────────────────
+  // ── Step 4: Parse via inner instructions (same approach as cli.ts) ─────
 
-  console.log("\nStep 4: Detecting Axiom Trade instruction...");
+  console.log("\nStep 4: Parsing transaction via inner instructions (like cli.ts)...");
+  let parsedDex: string | undefined;
+  try {
+    const parsedResult = await parseAxiomTransaction(connection, signature);
+    parsedDex = parsedResult.dex;
+    console.log("\n=== Parsed Swap (inner instructions — cli.ts approach) ===");
+    console.log(`  Signer:           ${parsedResult.signer}`);
+    console.log(`  Instruction Type: ${parsedResult.instructionType}`);
+    console.log(`  Direction:        ${parsedResult.direction}`);
+    console.log(`  DEX:              ${parsedResult.dex}`);
+    console.log(`  Token Mint:       ${parsedResult.tokenMint}`);
+    console.log(`  Token Program:    ${parsedResult.tokenProgramType}`);
+    console.log(
+      `  SOL Amount:       ${Math.abs(parsedResult.solAmount).toFixed(9)} SOL`
+    );
+    console.log(
+      `  Token Amount:     ${Math.abs(parsedResult.tokenAmount).toFixed(6)} tokens`
+    );
+  } catch (err: any) {
+    console.log(`  ⚠️  Parser fallback failed: ${err.message || err}`);
+    console.log("     Continuing with outer-data-only decode...");
+  }
+
+  // ── Step 5: Check if it's an Axiom transaction (outer data) ────────────
+
+  console.log("\nStep 5: Detecting Axiom Trade instruction from outer data...");
   if (!isAxiomTransaction(rawOuterTx)) {
     console.error("❌ Not an Axiom Trade transaction");
     console.log("   Instruction programs found:");
@@ -175,9 +201,9 @@ async function main(): Promise<void> {
     `  ✅ Axiom Trade program detected (${AXIOM_TRADE_PROGRAM_ID.toBase58()})`
   );
 
-  // ── Step 5: Decode the swap from outer data ────────────────────────────
+  // ── Step 6: Decode the swap from outer data ────────────────────────────
 
-  console.log("\nStep 5: Decoding swap from outer transaction structure...");
+  console.log("\nStep 6: Decoding swap from outer transaction structure...");
   const decoded = findAxiomSwapInstruction(rawOuterTx);
 
   if (!decoded) {
@@ -189,6 +215,9 @@ async function main(): Promise<void> {
   console.log(`  Instruction Type: ${decoded.instructionType}`);
   console.log(`  Direction:        ${decoded.direction.toUpperCase()}`);
   console.log(`  DEX:              ${decoded.dex}`);
+  if (parsedDex && decoded.dex === "unknown") {
+    console.log(`  DEX (from parser): ${parsedDex}`);
+  }
   console.log(`  Token Mint:       ${decoded.tokenMint.toBase58()}`);
   console.log(`  Token Program:    ${decoded.tokenProgramType}`);
   console.log(`  Original Signer:  ${decoded.signer.toBase58()}`);
@@ -237,10 +266,10 @@ async function main(): Promise<void> {
     );
   }
 
-  // ── Step 6: Mirror the swap ────────────────────────────────────────────
+  // ── Step 7: Mirror the swap ────────────────────────────────────────────
 
   console.log(`\n${"─".repeat(60)}`);
-  console.log("Step 6: Mirroring swap with random keypair...\n");
+  console.log("Step 7: Mirroring swap with random keypair...\n");
 
   const mirrorKeypair = Keypair.generate();
   console.log(
@@ -289,10 +318,10 @@ async function main(): Promise<void> {
     `  Instructions Built: ${mirrorResult.instructions!.length}`
   );
 
-  // ── Step 7: Compare original vs mirrored ───────────────────────────────
+  // ── Step 8: Compare original vs mirrored ───────────────────────────────
 
   console.log(`\n${"─".repeat(60)}`);
-  console.log("Step 7: Comparing original vs mirrored...\n");
+  console.log("Step 8: Comparing original vs mirrored...\n");
 
   console.log("  Original Transaction:");
   console.log(`    Signer:    ${decoded.signer.toBase58()}`);
@@ -350,10 +379,10 @@ async function main(): Promise<void> {
     );
   }
 
-  // ── Step 8: Simulate the mirrored transaction ──────────────────────────
+  // ── Step 9: Simulate the mirrored transaction ──────────────────────────
 
   console.log(`\n${"─".repeat(60)}`);
-  console.log("Step 8: Simulating mirrored transaction...\n");
+  console.log("Step 9: Simulating mirrored transaction...\n");
   console.log(
     "  ⚠️  Note: Simulation will likely fail because the random keypair"
   );

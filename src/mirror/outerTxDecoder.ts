@@ -219,7 +219,7 @@ function decodeAxiomOuterInstruction(
   const dexProgramKey = resolvedAccounts[11]!;
 
   // --- Detect DEX ---
-  const dex = detectDex(dexProgramKey);
+  const dex = detectDex(dexProgramKey, resolvedAccounts);
 
   // --- Detect token program type ---
   const tokenProgramType = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
@@ -290,9 +290,20 @@ function getDirection(type: AxiomInstructionType): "buy" | "sell" | null {
 }
 
 function detectDex(
-  dexProgram: PublicKey
+  dexProgramKey: PublicKey,
+  allAccounts: PublicKey[]
 ): "pumpfun" | "pumpswap" | "unknown" {
-  if (dexProgram.equals(PUMPFUN_PROGRAM_ID)) return "pumpfun";
-  if (dexProgram.equals(PUMPSWAP_PROGRAM_ID)) return "pumpswap";
+  // Primary: check the expected position [11] (dexProgram)
+  if (dexProgramKey.equals(PUMPFUN_PROGRAM_ID)) return "pumpfun";
+  if (dexProgramKey.equals(PUMPSWAP_PROGRAM_ID)) return "pumpswap";
+
+  // Fallback: scan all instruction accounts for known DEX program IDs.
+  // Compact and non-standard layouts may place the DEX program at a
+  // different position.
+  for (const acc of allAccounts) {
+    if (acc.equals(PUMPFUN_PROGRAM_ID)) return "pumpfun";
+    if (acc.equals(PUMPSWAP_PROGRAM_ID)) return "pumpswap";
+  }
+
   return "unknown";
 }
