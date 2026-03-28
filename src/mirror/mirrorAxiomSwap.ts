@@ -32,12 +32,14 @@ import {
 import {
   AXIOM_TRADE_PROGRAM_ID,
   AXIOM_DISCRIMINATORS,
+  COMPUTE_BUDGET_PROGRAM_ID,
   SYSTEM_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
   PUMPFUN_PROGRAM_ID,
+  PUMPSWAP_PROGRAM_ID,
   PUMPFUN_FEE_PROGRAM_ID,
   PUMPFUN_FEE_RECIPIENT,
 } from "../constants";
@@ -140,7 +142,7 @@ export async function mirrorAxiomSwap(
 
   // --- 2. Only mirror buys (copy-trading typically mirrors buys) ---
   // Sells can also be mirrored if desired; direction is passed through.
-  const { direction, tokenMint, tokenProgramType, pumpfunAccounts, dex } =
+  const { direction, dex } =
     decoded;
 
   // --- 3. Calculate mirror amounts ---
@@ -151,6 +153,7 @@ export async function mirrorAxiomSwap(
     computeUnitPrice,
     createATA = true,
   } = config;
+  const shouldCreateATA = createATA && dex !== "pumpswap";
 
   let mirrorAmountIn: bigint;
   let mirrorMinAmountOut: bigint;
@@ -179,9 +182,12 @@ export async function mirrorAxiomSwap(
 
   // --- 4. Build mirrored instructions ---
   const myWallet = keypair.publicKey;
-  const tokenProgramId = tokenProgramType === "token2022"
-    ? TOKEN_2022_PROGRAM_ID
-    : TOKEN_PROGRAM_ID;
+  const tokenContext = await resolveTradeTokenContext(decoded, config.connection);
+  const tokenMint = tokenContext.mint;
+  const tokenProgramId = tokenContext.tokenProgramId;
+  const resolvedTokenProgramType = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID)
+    ? "token2022"
+    : "token";
 
   const instructions: TransactionInstruction[] = [];
 
@@ -192,7 +198,7 @@ export async function mirrorAxiomSwap(
   }
 
   // 4b. Create ATA for the token (idempotent)
-  if (createATA) {
+  if (shouldCreateATA) {
     const myATA = deriveATA(myWallet, tokenMint, tokenProgramId);
     instructions.push(
       createATAIdempotentIx(myWallet, myATA, myWallet, tokenMint, tokenProgramId)
@@ -205,7 +211,9 @@ export async function mirrorAxiomSwap(
     myWallet,
     mirrorAmountIn,
     mirrorMinAmountOut,
+    tokenMint,
     tokenProgramId,
+    tokenContext.signerOwnedTokenAccounts,
     config.connection,
   );
   instructions.push(swapIx);
@@ -231,7 +239,7 @@ export async function mirrorAxiomSwap(
       originalMinAmountOut: decoded.minAmountOut,
       mirrorAmountIn,
       mirrorMinAmountOut,
-      tokenProgramType,
+      tokenProgramType: resolvedTokenProgramType,
     },
   };
 }
@@ -287,10 +295,21 @@ async function buildMirroredSwapIx(
   myWallet: PublicKey,
   amountIn: bigint,
   minAmountOut: bigint,
+  tokenMint: PublicKey,
   tokenProgramId: PublicKey,
+  signerOwnedTokenAccounts: SignerOwnedTokenAccountInfo[],
   connection?: Connection,
 ): Promise<TransactionInstruction> {
-  const { tokenMint, pumpfunAccounts, instructionType } = decoded;
+  const { pumpfunAccounts, instructionType } = decoded;
+  if (decoded.dex === "pumpswap") {
+    return buildMirroredPumpSwapIx(
+      decoded,
+      myWallet,
+      tokenMint,
+      tokenProgramId,
+      signerOwnedTokenAccounts
+    );
+  }
 
   // Derive remapped accounts for my wallet
   const myATA = deriveATA(myWallet, tokenMint, tokenProgramId);
@@ -306,11 +325,7 @@ async function buildMirroredSwapIx(
   const creatorVault = pumpfunAccounts.creatorVault;
 
   // Encode instruction data
-  const data = encodeInstructionData(
-    instructionType,
-    amountIn,
-    minAmountOut
-  );
+  const data = encodeInstructionData(instructionType, amountIn, minAmountOut);
 
   // Build accounts list — same layout as the original, with wallet remapped
   const accounts: AccountMeta[] = [
@@ -363,6 +378,49 @@ async function buildMirroredSwapIx(
     programId: AXIOM_TRADE_PROGRAM_ID,
     keys: accounts,
     data,
+  });
+}
+
+function buildMirroredPumpSwapIx(
+  decoded: DecodedAxiomOuter,
+  myWallet: PublicKey,
+  tokenMint: PublicKey,
+  tokenProgramId: PublicKey,
+  signerOwnedTokenAccounts: SignerOwnedTokenAccountInfo[]
+): TransactionInstruction {
+  const myTokenATA = deriveATA(myWallet, tokenMint, tokenProgramId);
+  const myWsolATA = deriveATA(myWallet, NATIVE_MINT, TOKEN_PROGRAM_ID);
+  const sourceSigner = decoded.signer;
+
+  const remappedAccounts = decoded.resolvedAccounts.map((account) => {
+    if (account.equals(sourceSigner)) {
+      return myWallet;
+    }
+    const signerToken = signerOwnedTokenAccounts.find((a) =>
+      a.address.equals(account)
+    );
+    if (!signerToken) {
+      return account;
+    }
+    if (signerToken.mint.equals(tokenMint)) {
+      return myTokenATA;
+    }
+    if (signerToken.mint.equals(NATIVE_MINT)) {
+      return myWsolATA;
+    }
+    return account;
+  });
+
+  const keys: AccountMeta[] = remappedAccounts.map((pubkey) => ({
+    pubkey,
+    isSigner: pubkey.equals(myWallet),
+    isWritable: !isKnownReadonlyProgram(pubkey),
+  }));
+
+  return new TransactionInstruction({
+    programId: AXIOM_TRADE_PROGRAM_ID,
+    keys,
+    data: Buffer.from(decoded.rawData),
   });
 }
 
@@ -465,4 +523,119 @@ function createATAIdempotentIx(
     ],
     data: Buffer.from([1]), // CreateIdempotent
   });
+}
+
+async function resolveTokenProgramId(
+  decoded: DecodedAxiomOuter,
+  connection?: Connection
+): Promise<PublicKey> {
+  // Prefer the outer instruction's token program account when it is valid.
+  if (
+    decoded.tokenProgram.equals(TOKEN_PROGRAM_ID) ||
+    decoded.tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
+  ) {
+    return decoded.tokenProgram;
+  }
+
+  // For layouts that don't place tokenProgram at the expected position,
+  // derive from mint owner when RPC connection is available.
+  if (connection) {
+    const mintInfo = await connection.getAccountInfo(decoded.tokenMint, "confirmed");
+    if (mintInfo?.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+      return TOKEN_2022_PROGRAM_ID;
+    }
+  }
+
+  return decoded.tokenProgramType === "token2022"
+    ? TOKEN_2022_PROGRAM_ID
+    : TOKEN_PROGRAM_ID;
+}
+
+interface SignerOwnedTokenAccountInfo {
+  address: PublicKey;
+  mint: PublicKey;
+  tokenProgramId: PublicKey;
+}
+
+async function resolveTradeTokenContext(
+  decoded: DecodedAxiomOuter,
+  connection?: Connection
+): Promise<{
+  mint: PublicKey;
+  tokenProgramId: PublicKey;
+  signerOwnedTokenAccounts: SignerOwnedTokenAccountInfo[];
+}> {
+  const fallbackTokenProgramId = await resolveTokenProgramId(decoded, connection);
+  if (!connection || decoded.dex !== "pumpswap") {
+    return {
+      mint: decoded.tokenMint,
+      tokenProgramId: fallbackTokenProgramId,
+      signerOwnedTokenAccounts: [],
+    };
+  }
+
+  const signerOwnedTokenAccounts = await fetchSignerOwnedTokenAccounts(
+    connection,
+    decoded.resolvedAccounts,
+    decoded.signer
+  );
+  const nonNative = signerOwnedTokenAccounts.find(
+    (a) => !a.mint.equals(NATIVE_MINT)
+  );
+  if (nonNative) {
+    return {
+      mint: nonNative.mint,
+      tokenProgramId: nonNative.tokenProgramId,
+      signerOwnedTokenAccounts,
+    };
+  }
+
+  return {
+    mint: decoded.tokenMint,
+    tokenProgramId: fallbackTokenProgramId,
+    signerOwnedTokenAccounts,
+  };
+}
+
+async function fetchSignerOwnedTokenAccounts(
+  connection: Connection,
+  accounts: PublicKey[],
+  sourceSigner: PublicKey
+): Promise<SignerOwnedTokenAccountInfo[]> {
+  const infos = await connection.getMultipleAccountsInfo(accounts, "confirmed");
+  const result: SignerOwnedTokenAccountInfo[] = [];
+
+  for (let i = 0; i < accounts.length; i++) {
+    const info = infos[i];
+    if (!info) continue;
+    const isTokenProgram =
+      info.owner.equals(TOKEN_PROGRAM_ID) || info.owner.equals(TOKEN_2022_PROGRAM_ID);
+    if (!isTokenProgram || info.data.length < 64) continue;
+
+    const mint = new PublicKey(info.data.subarray(0, 32));
+    const owner = new PublicKey(info.data.subarray(32, 64));
+    if (!owner.equals(sourceSigner)) continue;
+
+    result.push({
+      address: accounts[i]!,
+      mint,
+      tokenProgramId: info.owner,
+    });
+  }
+
+  return result;
+}
+
+function isKnownReadonlyProgram(pubkey: PublicKey): boolean {
+  return (
+    pubkey.equals(SYSTEM_PROGRAM_ID) ||
+    pubkey.equals(TOKEN_PROGRAM_ID) ||
+    pubkey.equals(TOKEN_2022_PROGRAM_ID) ||
+    pubkey.equals(ASSOCIATED_TOKEN_PROGRAM_ID) ||
+    pubkey.equals(AXIOM_TRADE_PROGRAM_ID) ||
+    pubkey.equals(PUMPFUN_PROGRAM_ID) ||
+    pubkey.equals(PUMPSWAP_PROGRAM_ID) ||
+    pubkey.equals(PUMPFUN_FEE_PROGRAM_ID) ||
+    pubkey.equals(COMPUTE_BUDGET_PROGRAM_ID)
+  );
 }

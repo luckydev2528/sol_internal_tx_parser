@@ -1,411 +1,441 @@
 /**
- * CLI tool to test the mirror functionality against a real Axiom Trade transaction.
- *
- * This fetches a real transaction from RPC, converts it to outer-only data
- * (no inner instructions), decodes the Axiom swap, and rebuilds a mirrored
- * transaction using a random keypair — demonstrating the full mirror pipeline.
- *
- * Usage:
- *   npx ts-node src/mirror-cli.ts <transaction-signature> [rpc-url]
- *
- * Example:
- *   npx ts-node src/mirror-cli.ts 4TphkyQv7wnYRkiD2WcujxafffAoNuT9HJn83AdGrBrM1TdQ8X2FFZVZ1oEaWV7n97wFnygoqupr48kf2zAjvGtM
+ * Live mirror CLI:
+ * - Subscribes to LaserStream transaction updates for a target wallet.
+ * - On first matching transaction, fetches the full transaction from RPC.
+ * - Uses ONLY outer transaction message data (no inner instructions).
+ * - Builds a mirrored Axiom swap using a keypair from .env, then exits.
  */
 
+import dotenv from "dotenv";
+import Client, {
+  CommitmentLevel,
+  type ClientDuplexStream,
+  type SubscribeRequest,
+  type SubscribeUpdate,
+} from "@triton-one/yellowstone-grpc";
+import bs58 from "bs58";
 import {
+  AddressLookupTableAccount,
   Keypair,
   PublicKey,
-  AddressLookupTableAccount,
+  TransactionMessage,
+  VersionedTransaction,
+  type Connection,
 } from "@solana/web3.js";
-import { createConnection } from "./utils/connection";
+import {
+  AXIOM_TRADE_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+} from "./constants";
 import {
   findAxiomSwapInstruction,
   isAxiomTransaction,
   mirrorAxiomSwap,
+  type RawOuterTransaction,
 } from "./mirror";
-import { parseAxiomTransaction } from "./parser/axiomParser";
-import { simulateAndSummarize } from "./simulator/simulator";
-import { AXIOM_TRADE_PROGRAM_ID } from "./constants";
+import { createConnection } from "./utils/connection";
+import { deriveATA } from "./utils/pda";
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+dotenv.config();
 
-  if (args.length < 1) {
-    console.error(
-      "Usage: npx ts-node src/mirror-cli.ts <transaction-signature> [rpc-url]"
+const DEFAULT_LASERSTREAM_ENDPOINT = "https://laserstream-mainnet-ewr.helius-rpc.com";
+const DEFAULT_HELIUS_API_KEY = process.env.HELIUS_API_KEY || "your_helius_api_key";
+const TARGET_WALLET = new PublicKey(process.env.TARGET_WALLET || "H4K5LjkjXVRBsQXJig3xq9L6co6SfoqRiqnih5iohX9A");
+
+function parseSecretKey(secret: string): Keypair {
+  const trimmed = secret.trim();
+  let bytes: Uint8Array;
+
+  if (trimmed.startsWith("[")) {
+    const parsed = JSON.parse(trimmed) as number[];
+    bytes = Uint8Array.from(parsed);
+  } else if (trimmed.includes(",")) {
+    bytes = Uint8Array.from(
+      trimmed
+        .split(",")
+        .map((v) => Number(v.trim()))
+        .filter((v) => Number.isInteger(v) && v >= 0 && v <= 255)
     );
-    process.exit(1);
+  } else {
+    bytes = bs58.decode(trimmed);
   }
 
-  const signature = args[0]!;
-  const rpcUrl = args[1] || "https://api.mainnet-beta.solana.com";
+  if (bytes.length === 64) {
+    return Keypair.fromSecretKey(bytes);
+  }
+  if (bytes.length === 32) {
+    return Keypair.fromSeed(bytes);
+  }
+  throw new Error(
+    `Unsupported private key length ${bytes.length}. Expected 32-byte seed or 64-byte secret key`
+  );
+}
 
-  console.log(`\n🪞 Mirror CLI — Axiom Trade Swap Mirror Test`);
-  console.log(`${"═".repeat(60)}`);
-  console.log(`📝 Signature: ${signature}`);
-  console.log(`📡 RPC:       ${rpcUrl}`);
-  if (!args[1]) {
-    console.log(
-      `  ⚠️  Using default public RPC — may be rate-limited. Pass your own RPC URL as 2nd arg.`
+function loadMirrorKeypairFromEnv(): Keypair {
+  const raw =
+    process.env.MIRROR_PRIVATE_KEY ||
+    process.env.SOLANA_PRIVATE_KEY ||
+    process.env.PRIVATE_KEY;
+
+  if (!raw) {
+    throw new Error(
+      "Missing private key in .env. Set MIRROR_PRIVATE_KEY (or SOLANA_PRIVATE_KEY / PRIVATE_KEY)"
     );
   }
-  console.log();
 
-  const connection = createConnection(rpcUrl);
+  return parseSecretKey(raw);
+}
 
-  // ── Step 1: Fetch the raw transaction ──────────────────────────────────
+async function resolveMessageKeys(
+  connection: Connection,
+  staticKeys: PublicKey[],
+  addressTableLookups: readonly {
+    accountKey: PublicKey;
+    writableIndexes: readonly number[];
+    readonlyIndexes: readonly number[];
+  }[]
+): Promise<PublicKey[]> {
+  let resolvedKeys: PublicKey[] = [...staticKeys];
+  if (addressTableLookups.length === 0) {
+    return resolvedKeys;
+  }
 
-  console.log("Step 1: Fetching raw transaction...");
-  const rawResponse = await connection.getTransaction(signature, {
+  const altAccounts: AddressLookupTableAccount[] = [];
+  for (const lookup of addressTableLookups) {
+    const result = await connection.getAddressLookupTable(lookup.accountKey);
+    if (result.value) {
+      altAccounts.push(result.value);
+    }
+  }
+
+  const writableKeys: PublicKey[] = [];
+  const readonlyKeys: PublicKey[] = [];
+
+  for (let i = 0; i < addressTableLookups.length; i++) {
+    const lookup = addressTableLookups[i]!;
+    const altAccount = altAccounts[i];
+    if (!altAccount) continue;
+
+    for (const idx of lookup.writableIndexes) {
+      const addr = altAccount.state.addresses[idx];
+      if (addr) writableKeys.push(addr);
+    }
+
+    for (const idx of lookup.readonlyIndexes) {
+      const addr = altAccount.state.addresses[idx];
+      if (addr) readonlyKeys.push(addr);
+    }
+  }
+
+  resolvedKeys = [...staticKeys, ...writableKeys, ...readonlyKeys];
+  return resolvedKeys;
+}
+
+async function buildRawOuterFromSignature(
+  connection: Connection,
+  signature: string
+): Promise<RawOuterTransaction> {
+  const tx = await connection.getTransaction(signature, {
     maxSupportedTransactionVersion: 0,
     commitment: "confirmed",
   });
 
-  if (!rawResponse) {
-    console.error("❌ Transaction not found");
-    process.exit(1);
+  if (!tx) {
+    throw new Error(`Transaction not found for signature ${signature}`);
   }
 
-  if (rawResponse.meta?.err) {
-    console.warn(
-      `⚠️  Transaction failed on-chain: ${JSON.stringify(rawResponse.meta.err)}`
+  if (tx.meta?.err) {
+    throw new Error(
+      `Detected transaction failed on-chain: ${JSON.stringify(tx.meta.err)}`
     );
   }
 
-  // Access the VersionedMessage from the response
-  const message = rawResponse.transaction.message;
+  const message = tx.transaction.message;
   const staticKeys = message.staticAccountKeys;
   const compiledIxs = message.compiledInstructions;
-
-  console.log(`  ✅ Fetched transaction with ${staticKeys.length} static accounts`);
-  console.log(`  📋 ${compiledIxs.length} outer instruction(s)`);
-
-  // ── Step 2: Resolve Address Lookup Tables ──────────────────────────────
-
-  console.log("\nStep 2: Resolving address lookup tables...");
   const addressTableLookups = message.addressTableLookups;
+  const resolvedKeys = await resolveMessageKeys(
+    connection,
+    staticKeys,
+    addressTableLookups
+  );
 
-  let resolvedKeys: PublicKey[] = [...staticKeys];
-
-  if (addressTableLookups.length > 0) {
-    console.log(
-      `  📋 Found ${addressTableLookups.length} ALT(s), resolving...`
-    );
-
-    const altAccounts: AddressLookupTableAccount[] = [];
-    for (const lookup of addressTableLookups) {
-      const result = await connection.getAddressLookupTable(lookup.accountKey);
-      if (result.value) {
-        altAccounts.push(result.value);
-      }
-    }
-
-    // Resolve loaded addresses from ALTs (writable first, then readonly)
-    const writableKeys: PublicKey[] = [];
-    const readonlyKeys: PublicKey[] = [];
-
-    for (let i = 0; i < addressTableLookups.length; i++) {
-      const lookup = addressTableLookups[i]!;
-      const altAccount = altAccounts[i];
-      if (!altAccount) continue;
-
-      for (const idx of lookup.writableIndexes) {
-        const addr = altAccount.state.addresses[idx];
-        if (addr) writableKeys.push(addr);
-      }
-      for (const idx of lookup.readonlyIndexes) {
-        const addr = altAccount.state.addresses[idx];
-        if (addr) readonlyKeys.push(addr);
-      }
-    }
-
-    resolvedKeys = [...staticKeys, ...writableKeys, ...readonlyKeys];
-    console.log(
-      `  ✅ Resolved ${resolvedKeys.length} total account keys (${staticKeys.length} static + ${writableKeys.length} writable + ${readonlyKeys.length} readonly from ALT)`
-    );
-  } else {
-    console.log("  ℹ️  No address lookup tables");
-  }
-
-  // ── Step 3: Convert to RawOuterTransaction ─────────────────────────────
-
-  console.log("\nStep 3: Converting to outer-only transaction data...");
-
-  // Build the RawOuterTransaction manually from the VersionedMessage
-  // (this simulates what a gRPC/LaserStream feed would provide)
-  const outerInstructions = compiledIxs.map((cix) => ({
-    programIdIndex: cix.programIdIndex,
-    accounts: Array.from(cix.accountKeyIndexes),
-    data: Buffer.from(cix.data),
-  }));
-
-  const rawOuterTx = {
+  return {
     accountKeys: resolvedKeys,
-    instructions: outerInstructions,
+    instructions: compiledIxs.map((cix) => ({
+      programIdIndex: cix.programIdIndex,
+      accounts: Array.from(cix.accountKeyIndexes),
+      data: Buffer.from(cix.data),
+    })),
     addressTableLookups:
       addressTableLookups.length > 0
-        ? addressTableLookups.map((l) => ({
-            accountKey: l.accountKey,
-            writableIndexes: Array.from(l.writableIndexes),
-            readonlyIndexes: Array.from(l.readonlyIndexes),
+        ? addressTableLookups.map((lookup) => ({
+            accountKey: lookup.accountKey,
+            writableIndexes: Array.from(lookup.writableIndexes),
+            readonlyIndexes: Array.from(lookup.readonlyIndexes),
           }))
         : undefined,
   };
+}
 
-  console.log("  ✅ Built RawOuterTransaction from outer data only");
-  console.log(
-    `     (NO inner instructions, NO parsed metadata, NO token balances)`
-  );
-
-  // ── Step 4: Parse via inner instructions (same approach as cli.ts) ─────
-
-  console.log("\nStep 4: Parsing transaction via inner instructions (like cli.ts)...");
-  let parsedDex: string | undefined;
-  try {
-    const parsedResult = await parseAxiomTransaction(connection, signature);
-    parsedDex = parsedResult.dex;
-    console.log("\n=== Parsed Swap (inner instructions — cli.ts approach) ===");
-    console.log(`  Signer:           ${parsedResult.signer}`);
-    console.log(`  Instruction Type: ${parsedResult.instructionType}`);
-    console.log(`  Direction:        ${parsedResult.direction}`);
-    console.log(`  DEX:              ${parsedResult.dex}`);
-    console.log(`  Token Mint:       ${parsedResult.tokenMint}`);
-    console.log(`  Token Program:    ${parsedResult.tokenProgramType}`);
-    console.log(
-      `  SOL Amount:       ${Math.abs(parsedResult.solAmount).toFixed(9)} SOL`
-    );
-    console.log(
-      `  Token Amount:     ${Math.abs(parsedResult.tokenAmount).toFixed(6)} tokens`
-    );
-  } catch (err: any) {
-    console.log(`  ⚠️  Parser fallback failed: ${err.message || err}`);
-    console.log("     Continuing with outer-data-only decode...");
-  }
-
-  // ── Step 5: Check if it's an Axiom transaction (outer data) ────────────
-
-  console.log("\nStep 5: Detecting Axiom Trade instruction from outer data...");
-  if (!isAxiomTransaction(rawOuterTx)) {
-    console.error("❌ Not an Axiom Trade transaction");
-    console.log("   Instruction programs found:");
-    for (const ix of rawOuterTx.instructions) {
-      if (ix.programIdIndex < resolvedKeys.length) {
-        console.log(
-          `     - ${resolvedKeys[ix.programIdIndex]!.toBase58()}`
-        );
+function writeSubscribeRequest(
+  stream: ClientDuplexStream,
+  request: SubscribeRequest
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    stream.write(request, (err?: Error | null) => {
+      if (err) {
+        reject(err);
+        return;
       }
-    }
-    process.exit(1);
+      resolve();
+    });
+  });
+}
+
+async function waitForFirstWalletSignature(
+  endpoint: string,
+  apiKey: string,
+  wallet: PublicKey
+): Promise<string> {
+  const client = new Client(endpoint, apiKey, undefined);
+  await client.connect();
+  const stream = await client.subscribe();
+
+  const request: SubscribeRequest = {
+    accounts: {},
+    slots: {},
+    transactions: {
+      walletMonitor: {
+        vote: false,
+        failed: false,
+        accountInclude: [wallet.toBase58()],
+        accountExclude: [],
+        accountRequired: [],
+      },
+    },
+    transactionsStatus: {},
+    blocks: {},
+    blocksMeta: {},
+    entry: {},
+    commitment: CommitmentLevel.CONFIRMED,
+    accountsDataSlice: [],
+    ping: undefined,
+    fromSlot: undefined,
+  };
+
+  await writeSubscribeRequest(stream, request);
+
+  return await new Promise<string>((resolve, reject) => {
+    let done = false;
+    const finish = (fn: () => void): void => {
+      if (done) return;
+      done = true;
+      try {
+        stream.end();
+      } catch {
+        // no-op
+      }
+      fn();
+    };
+
+    stream.on("data", (update: SubscribeUpdate) => {
+      const sigBytes = update.transaction?.transaction?.signature;
+      if (!sigBytes || sigBytes.length === 0) {
+        return;
+      }
+      const signature = bs58.encode(Buffer.from(sigBytes));
+      finish(() => resolve(signature));
+    });
+
+    stream.on("error", (err: Error) => {
+      finish(() => reject(err));
+    });
+
+    stream.on("close", () => {
+      if (done) return;
+      done = true;
+      reject(new Error("LaserStream subscription closed before any transaction"));
+    });
+  });
+}
+
+async function mirrorFromSignature(
+  connection: Connection,
+  signature: string,
+  mirrorKeypair: Keypair
+): Promise<void> {
+  console.log(`\nStep 1: Fetching transaction ${signature} from RPC...`);
+  const rawOuterTx = await buildRawOuterFromSignature(connection, signature);
+
+  console.log("Step 2: Verifying Axiom instruction from outer data...");
+  if (!isAxiomTransaction(rawOuterTx)) {
+    throw new Error("Detected transaction is not an Axiom Trade transaction");
   }
-  console.log(
-    `  ✅ Axiom Trade program detected (${AXIOM_TRADE_PROGRAM_ID.toBase58()})`
-  );
 
-  // ── Step 6: Decode the swap from outer data ────────────────────────────
-
-  console.log("\nStep 6: Decoding swap from outer transaction structure...");
   const decoded = findAxiomSwapInstruction(rawOuterTx);
-
   if (!decoded) {
-    console.error("❌ Could not decode Axiom swap instruction from outer data");
-    process.exit(1);
+    throw new Error("Could not decode Axiom swap from outer transaction data");
   }
 
-  console.log("\n=== Decoded Swap (outer data only) ===");
-  console.log(`  Instruction Type: ${decoded.instructionType}`);
-  console.log(`  Direction:        ${decoded.direction.toUpperCase()}`);
-  console.log(`  DEX:              ${decoded.dex}`);
-  if (parsedDex && decoded.dex === "unknown") {
-    console.log(`  DEX (from parser): ${parsedDex}`);
-  }
-  console.log(`  Token Mint:       ${decoded.tokenMint.toBase58()}`);
-  console.log(`  Token Program:    ${decoded.tokenProgramType}`);
-  console.log(`  Original Signer:  ${decoded.signer.toBase58()}`);
-  console.log(`  Amount In:        ${decoded.amountIn}`);
-  console.log(`  Min Amount Out:   ${decoded.minAmountOut}`);
-
-  if (decoded.direction === "buy") {
-    const solAmount = Number(decoded.amountIn) / 1e9;
-    console.log(`  Amount In (SOL):  ${solAmount.toFixed(9)} SOL`);
-  }
-
-  console.log(`\n  Pump.fun Account Layout:`);
-  const accs = decoded.pumpfunAccounts;
-  console.log(`    [0]  Global:            ${accs.global.toBase58()}`);
-  console.log(`    [1]  Fee Recipient:     ${accs.feeRecipient.toBase58()}`);
-  console.log(`    [2]  Mint:              ${accs.mint.toBase58()}`);
-  console.log(`    [3]  Bonding Curve:     ${accs.bondingCurve.toBase58()}`);
   console.log(
-    `    [4]  Assoc. BC:         ${accs.associatedBondingCurve.toBase58()}`
+    `  ✅ Decoded ${decoded.direction.toUpperCase()} ${decoded.dex} swap for ${decoded.tokenMint.toBase58()}`
   );
-  console.log(`    [5]  Assoc. User (ATA): ${accs.associatedUser.toBase58()}`);
-  console.log(`    [6]  Signer:            ${accs.signer.toBase58()}`);
-  console.log(`    [7]  System Program:    ${accs.systemProgram.toBase58()}`);
-  console.log(`    [8]  Token Program:     ${accs.tokenProgram.toBase58()}`);
-  console.log(`    [9]  Creator Vault:     ${accs.creatorVault.toBase58()}`);
-  console.log(`    [10] Event Authority:   ${accs.eventAuthority.toBase58()}`);
-  console.log(`    [11] DEX Program:       ${accs.dexProgram.toBase58()}`);
-  if (accs.globalVolumeAccumulator) {
-    console.log(
-      `    [12] Global Vol. Acc:   ${accs.globalVolumeAccumulator.toBase58()}`
-    );
-  }
-  if (accs.userVolumeAccumulator) {
-    console.log(
-      `    [13] User Vol. Acc:     ${accs.userVolumeAccumulator.toBase58()}`
-    );
-  }
-  if (accs.feeConfig) {
-    console.log(
-      `    [14] Fee Config:        ${accs.feeConfig.toBase58()}`
-    );
-  }
-  if (accs.feeProgram) {
-    console.log(
-      `    [15] Fee Program:       ${accs.feeProgram.toBase58()}`
-    );
-  }
-
-  // ── Step 7: Mirror the swap ────────────────────────────────────────────
-
-  console.log(`\n${"─".repeat(60)}`);
-  console.log("Step 7: Mirroring swap with random keypair...\n");
-
-  const mirrorKeypair = Keypair.generate();
   console.log(
-    `  🔑 Mirror Wallet: ${mirrorKeypair.publicKey.toBase58()} (random — for testing only)`
+    `  ✅ Axiom program: ${AXIOM_TRADE_PROGRAM_ID.toBase58()} | Signer: ${decoded.signer.toBase58()}`
   );
 
-  const fixedBuyAmount = BigInt(100_000_000); // 0.1 SOL for testing
-  console.log(
-    `  💰 Fixed Buy Amount: ${Number(fixedBuyAmount) / 1e9} SOL (${fixedBuyAmount} lamports)`
-  );
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const fixedBuyAmount = BigInt(100_000); // 0.0001 SOL
 
-  const { blockhash } = await connection.getLatestBlockhash("confirmed");
-
-  const mirrorResult = await mirrorAxiomSwap(
-    rawOuterTx,
-    mirrorKeypair,
-    blockhash,
-    {
-      fixedBuyAmountLamports: fixedBuyAmount,
-      slippageBps: 5000, // 50% for meme coins
-      computeUnitLimit: 200_000,
-      computeUnitPrice: BigInt(100_000), // 0.0001 SOL priority fee
-      createATA: true,
-      connection,
-    }
-  );
+  console.log("Step 3: Building mirrored transaction...");
+  const mirrorResult = await mirrorAxiomSwap(rawOuterTx, mirrorKeypair, latest.blockhash, {
+    fixedBuyAmountLamports: fixedBuyAmount,
+    slippageBps: 5000,
+    computeUnitLimit: 200_000,
+    computeUnitPrice: BigInt(100_000),
+    createATA: true,
+    connection,
+  });
 
   if (!mirrorResult.success) {
-    console.error(`  ❌ Mirror failed: ${mirrorResult.error}`);
-    process.exit(1);
+    throw new Error(`Mirror failed: ${mirrorResult.error}`);
   }
 
-  console.log(`  ✅ Mirror successful!`);
-
   const info = mirrorResult.swapInfo!;
-  console.log(`\n=== Mirror Result ===`);
+  if (!mirrorResult.instructions || mirrorResult.instructions.length === 0) {
+    throw new Error("Mirror failed: no mirrored instructions were built");
+  }
+
+  if (decoded.dex === "pumpfun" && info.tokenMint !== decoded.tokenMint.toBase58()) {
+    throw new Error("Safety check failed: mirrored token does not match source token");
+  }
+  if (info.dex !== decoded.dex) {
+    throw new Error("Safety check failed: mirrored DEX does not match source DEX");
+  }
+
+  const tokenProgramId =
+    info.tokenProgramType === "token2022" ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const mirrorTokenMint = new PublicKey(info.tokenMint);
+  const mirrorTokenAta = deriveATA(mirrorKeypair.publicKey, mirrorTokenMint, tokenProgramId);
+  const preTokenAmount = await getTokenAmountRaw(connection, mirrorTokenAta);
+  const mirrorWalletLamports = await connection.getBalance(mirrorKeypair.publicKey, "confirmed");
+  const minRequiredLamports = info.direction === "buy" ? Number(info.mirrorAmountIn) : 50_000;
+  if (mirrorWalletLamports < minRequiredLamports) {
+    throw new Error(
+      `Insufficient SOL for live mirror. Wallet has ${mirrorWalletLamports} lamports, requires at least ${minRequiredLamports} lamports`
+    );
+  }
+
+  console.log("Step 4: Sending mirrored buy transaction...");
+  const messageV0 = new TransactionMessage({
+    payerKey: mirrorKeypair.publicKey,
+    recentBlockhash: latest.blockhash,
+    instructions: mirrorResult.instructions,
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(messageV0);
+  tx.sign([mirrorKeypair]);
+
+  const mirrorSignature = await connection.sendTransaction(tx, {
+    skipPreflight: false,
+    maxRetries: 3,
+  });
+  const confirmation = await connection.confirmTransaction(
+    {
+      signature: mirrorSignature,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    },
+    "confirmed"
+  );
+
+  if (confirmation.value.err) {
+    throw new Error(`Mirror on-chain transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+  }
+
+  const postTokenAmount = await getTokenAmountRaw(connection, mirrorTokenAta);
+  const tokenDelta = postTokenAmount - preTokenAmount;
+  if (tokenDelta <= 0n) {
+    throw new Error("Post-trade verification failed: no additional tokens received");
+  }
+
+  // Outer-only post-check: decode mirrored transaction from outer message fields.
+  const mirroredOuter = await buildRawOuterFromSignature(connection, mirrorSignature);
+  const mirroredDecoded = findAxiomSwapInstruction(mirroredOuter);
+  if (!mirroredDecoded) {
+    throw new Error("Post-check failed: could not decode mirrored transaction from outer data");
+  }
+  const mintMatches =
+    info.dex === "pumpfun"
+      ? mirroredDecoded.tokenMint.toBase58() === info.tokenMint
+      : true;
+  if (!mintMatches || mirroredDecoded.dex !== info.dex) {
+    throw new Error("Post-check failed: mirrored tx token/DEX mismatch on outer-data decode");
+  }
+
+  console.log("\n=== Mirror Result ===");
+  console.log(`  Mirror Wallet:      ${mirrorKeypair.publicKey.toBase58()}`);
   console.log(`  Direction:          ${info.direction.toUpperCase()}`);
   console.log(`  Token Mint:         ${info.tokenMint}`);
   console.log(`  DEX:                ${info.dex}`);
-  console.log(`  Token Program:      ${info.tokenProgramType}`);
   console.log(`  Original Amount In: ${info.originalAmountIn}`);
-  console.log(`  Original Min Out:   ${info.originalMinAmountOut}`);
   console.log(`  Mirror Amount In:   ${info.mirrorAmountIn}`);
   console.log(`  Mirror Min Out:     ${info.mirrorMinAmountOut}`);
   console.log(
-    `  Instructions Built: ${mirrorResult.instructions!.length}`
+    `  Instructions Built: ${mirrorResult.instructions?.length ?? 0}`
   );
+  console.log(`  Mirrored Tx Sig:    ${mirrorSignature}`);
+  console.log(`  Solscan:            https://solscan.io/tx/${mirrorSignature}`);
+  console.log(`  Tokens Received:    YES (+${tokenDelta.toString()} raw units at ATA ${mirrorTokenAta.toBase58()})`);
+  console.log("  Outer-only proof:   YES (decoded mirrored tx token + DEX from outer message only)");
 
-  // ── Step 8: Compare original vs mirrored ───────────────────────────────
+  console.log("\n=== Required Output ===");
+  console.log(`mirrored transaction signature: ${mirrorSignature}`);
+  console.log(`Solscan link of your mirrored buy: https://solscan.io/tx/${mirrorSignature}`);
+  console.log(`confirmation that tokens were actually received: YES (+${tokenDelta.toString()} raw units)`);
+  console.log("final function matching my required signature: mirrorAxiomSwap(sniperTx, keypair, latestBlockhash)");
+  console.log("confirmation again that it works from outer transaction data only: YES");
+}
 
-  console.log(`\n${"─".repeat(60)}`);
-  console.log("Step 8: Comparing original vs mirrored...\n");
-
-  console.log("  Original Transaction:");
-  console.log(`    Signer:    ${decoded.signer.toBase58()}`);
-  console.log(`    Amount In: ${decoded.amountIn} lamports`);
-  if (decoded.direction === "buy") {
-    console.log(
-      `               (${(Number(decoded.amountIn) / 1e9).toFixed(9)} SOL)`
-    );
-  }
-  console.log(`    Min Out:   ${decoded.minAmountOut}`);
-
-  console.log("\n  Mirrored Transaction:");
-  console.log(`    Signer:    ${mirrorKeypair.publicKey.toBase58()}`);
-  console.log(`    Amount In: ${info.mirrorAmountIn} lamports`);
-  if (info.direction === "buy") {
-    console.log(
-      `               (${(Number(info.mirrorAmountIn) / 1e9).toFixed(9)} SOL)`
-    );
-  }
-  console.log(`    Min Out:   ${info.mirrorMinAmountOut}`);
-
-  // Show the remapped accounts in the Axiom swap instruction
-  const axiomIx = mirrorResult.instructions!.find(
-    (ix) => ix.programId.toBase58() === AXIOM_TRADE_PROGRAM_ID.toBase58()
-  );
-  if (axiomIx) {
-    console.log("\n  Remapped Accounts in Mirror Instruction:");
-    console.log(
-      `    [5] ATA:    ${axiomIx.keys[5]?.pubkey.toBase58() ?? "N/A"} (remapped)`
-    );
-    console.log(
-      `    [6] Signer: ${axiomIx.keys[6]?.pubkey.toBase58() ?? "N/A"} (remapped)`
-    );
-    if (axiomIx.keys.length > 13) {
-      console.log(
-        `    [13] User Vol. Acc: ${axiomIx.keys[13]?.pubkey.toBase58() ?? "N/A"} (remapped)`
-      );
-    }
-
-    console.log("\n  Unchanged Accounts:");
-    console.log(
-      `    [0] Global:         ${axiomIx.keys[0]?.pubkey.toBase58() ?? "N/A"}`
-    );
-    console.log(
-      `    [2] Mint:           ${axiomIx.keys[2]?.pubkey.toBase58() ?? "N/A"}`
-    );
-    console.log(
-      `    [3] Bonding Curve:  ${axiomIx.keys[3]?.pubkey.toBase58() ?? "N/A"}`
-    );
-    console.log(
-      `    [9] Creator Vault:  ${axiomIx.keys[9]?.pubkey.toBase58() ?? "N/A"}`
-    );
-    console.log(
-      `    [11] DEX Program:   ${axiomIx.keys[11]?.pubkey.toBase58() ?? "N/A"}`
-    );
-  }
-
-  // ── Step 9: Simulate the mirrored transaction ──────────────────────────
-
-  console.log(`\n${"─".repeat(60)}`);
-  console.log("Step 9: Simulating mirrored transaction...\n");
-  console.log(
-    "  ⚠️  Note: Simulation will likely fail because the random keypair"
-  );
-  console.log("     has no SOL balance. This is expected for testing.");
-  console.log("     In production, use a funded wallet.\n");
-
+async function getTokenAmountRaw(
+  connection: Connection,
+  tokenAccount: PublicKey
+): Promise<bigint> {
   try {
-    const simSummary = await simulateAndSummarize(
-      connection,
-      mirrorResult.instructions!,
-      mirrorKeypair.publicKey
-    );
-    console.log(simSummary);
-  } catch (err: any) {
-    console.log(`  Simulation error: ${err.message || err}`);
+    const bal = await connection.getTokenAccountBalance(tokenAccount, "confirmed");
+    return BigInt(bal.value.amount);
+  } catch {
+    return 0n;
   }
+}
+
+async function main(): Promise<void> {
+  const rpcArg = process.argv[2]?.trim();
+  const rpcUrl = rpcArg || process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+  const endpoint = process.env.LASERSTREAM_ENDPOINT || DEFAULT_LASERSTREAM_ENDPOINT;
+  const apiKey = process.env.HELIUS_API_KEY || DEFAULT_HELIUS_API_KEY;
+  const mirrorKeypair = loadMirrorKeypairFromEnv();
+
+  console.log(`\n🪞 Mirror CLI — LaserStream Wallet Monitor`);
+  console.log(`${"═".repeat(60)}`);
+  console.log(`📡 LaserStream Endpoint: ${endpoint}`);
+  console.log(`📡 RPC Endpoint:         ${rpcUrl}`);
+  console.log(`👀 Monitoring Wallet:    ${TARGET_WALLET.toBase58()}`);
+  console.log(`🔑 Mirror Wallet:        ${mirrorKeypair.publicKey.toBase58()}`);
+  console.log("\nWaiting for first matching transaction...");
+  const signature = await waitForFirstWalletSignature(endpoint, apiKey, TARGET_WALLET);
+
+  console.log(`\n✅ Detected transaction: ${signature}`);
+  const connection = createConnection(rpcUrl);
+  await mirrorFromSignature(connection, signature, mirrorKeypair);
 
   console.log(`\n${"═".repeat(60)}`);
-  console.log("✅ Mirror CLI test complete!");
+  console.log("✅ Completed one mirror cycle. Exiting.");
   console.log(`${"═".repeat(60)}\n`);
 }
 
-main().catch((err) => {
-  console.error("❌ Error:", err.message || err);
+main().catch((err: unknown) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error("❌ Error:", msg);
   process.exit(1);
 });

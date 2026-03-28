@@ -66,12 +66,18 @@ npm test
 ## CLI Usage
 
 ```bash
-npx ts-node src/cli.ts <transaction-signature> [rpc-url]
+npx ts-node src/mirror-cli.ts
 ```
 
-Example:
+The CLI subscribes to LaserStream for a target wallet, waits for the first
+matching transaction, builds a mirrored transaction from OUTER message data
+only, then exits.
+
+Required `.env` values:
 ```bash
-npx ts-node src/cli.ts 4TphkyQv7wnYRkiD2WcujxafffAoNuT9HJn83AdGrBrM1TdQ8X2FFZVZ1oEaWV7n97wFnygoqupr48kf2zAjvGtM https://api.mainnet-beta.solana.com
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+HELIUS_API_KEY=your-helius-api-key
+MIRROR_PRIVATE_KEY=your-private-key
 ```
 
 ## Programmatic Usage
@@ -121,7 +127,7 @@ src/
 ├── index.ts                         # Main exports
 ├── constants.ts                     # Program IDs, discriminators, seeds
 ├── types.ts                         # TypeScript interfaces and enums
-├── cli.ts                           # CLI entry point
+├── mirror-cli.ts                    # Outer-only mirror CLI entry point
 ├── parser/
 │   ├── axiomParser.ts               # Parse Axiom Trade instructions
 │   └── routingLayout.ts             # Analyze routing layout

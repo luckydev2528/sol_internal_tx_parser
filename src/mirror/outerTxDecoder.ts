@@ -71,6 +71,8 @@ export interface DecodedAxiomOuter {
     feeConfig?: PublicKey;
     feeProgram?: PublicKey;
   };
+  /** Raw outer instruction bytes */
+  rawData: Buffer;
 }
 
 // ─── Main decode function ──────────────────────────────────────────────────
@@ -268,6 +270,7 @@ function decodeAxiomOuterInstruction(
     instructionIndex,
     resolvedAccounts,
     pumpfunAccounts,
+    rawData: Buffer.from(data),
   };
 }
 
