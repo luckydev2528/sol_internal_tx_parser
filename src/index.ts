@@ -78,3 +78,20 @@ export {
 } from "./utils/decoder";
 
 export { createConnection } from "./utils/connection";
+
+// Mirror — outer-transaction-only swap mirroring (no inner instructions)
+export {
+  mirrorAxiomSwap,
+  versionedTxToRawOuter,
+  decodeAxiomOuterInstructions,
+  findAxiomSwapInstruction,
+  isAxiomTransaction,
+} from "./mirror";
+export type {
+  MirrorConfig,
+  DecodedAxiomOuter,
+  RawOuterTransaction,
+  RawOuterInstruction,
+  AddressTableLookup,
+  MirrorResult,
+} from "./mirror";
